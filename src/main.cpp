@@ -203,5 +203,6 @@ void startMotor(MotorState dir, int pct) {
   }
   ledcWrite(pwmCh, 200);
   Serial.printf("Motor: %s for %lums\n",
-                dir==OPENING?"OPENING":"CLOSING", motorDur);
+                dir==OPENING?"OPENING":"CLOSING", motorDur); 
+                
 }
