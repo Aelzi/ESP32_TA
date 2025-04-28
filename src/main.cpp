@@ -18,7 +18,7 @@ FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-//=== Pins Motor & PWM ===
+//=== Pins Motor & PWM ====
 const int pin1    = 27;
 const int pin2    = 26;
 const int pinEn   = 14;
@@ -26,7 +26,7 @@ const int pwmCh   = 0;
 const int pwmFreq = 5000;
 const int pwmRes  = 8;
 
-//=== Pins Water Pump ===
+//=== Pins Water Pump ====
 const int pump1Pin = 32;  // Pompa 1
 const int pump2Pin = 33;  // Pompa 2
 const int pump3Pin = 25;  // Pompa 3
