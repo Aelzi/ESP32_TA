@@ -53,6 +53,23 @@ MotorState motorState = STOPPED;
 unsigned long motorStart = 0;
 unsigned long motorDur   = 0;
 
+// --  Global Variables untuk Water Flow Sensor --
+const int flowPin1 = 34;
+const int flowPin2 = 35;
+const int flowPin3 = 39;
+
+volatile unsigned long flowCount1 = 0;
+volatile unsigned long flowCount2 = 0;
+volatile unsigned long flowCount3 = 0;
+
+// Faktor konversi: misal, untuk YF-S201 biasanya Flow (L/min) = (PulseCount per 2 sec) / 15
+// (Karena 7.5 pps per L/min => pada 2 detik, 15 pulsa setara 1 L/min)
+
+// ISR untuk masing-masing sensor flow
+void IRAM_ATTR flowISR1() { flowCount1++; }
+void IRAM_ATTR flowISR2() { flowCount2++; }
+void IRAM_ATTR flowISR3() { flowCount3++; }
+
 // Prototipe fungsi
 void initHardware();
 bool readUltrasonic(Stream &stream, float &dist);
@@ -132,10 +149,27 @@ void loop() {
         Serial.println("Sensor 3: read FAILED");
     }
     
-    // 4) Baca perintah motor dari Firebase
+    // 4) Baca sensor Water Flow dan kirim ke Firebase
+    // Menghitung flow rate (L/min) menggunakan interval 2 detik: Flow = (PulseCount / 2) / 7.5 = PulseCount / 15
+    float flow1 = flowCount1 / 15.0;
+    float flow2 = flowCount2 / 15.0;
+    float flow3 = flowCount3 / 15.0;
+    Serial.printf("Flow 1: %.2f L/min\n", flow1);
+    sendToFirebase(flow1, "/TEST/flow1");
+    Serial.printf("Flow 2: %.2f L/min\n", flow2);
+    sendToFirebase(flow2, "/TEST/flow2");
+    Serial.printf("Flow 3: %.2f L/min\n", flow3);
+    sendToFirebase(flow3, "/TEST/flow3");
+    
+    // Reset counter water flow untuk siklus berikutnya
+    flowCount1 = 0;
+    flowCount2 = 0;
+    flowCount3 = 0;
+    
+    // 5) Baca perintah motor dari Firebase
     checkCommands();
     
-    // 5) Cek status water pump
+    // 6) Cek status water pump
     checkPumps();
 }
 
@@ -159,7 +193,15 @@ void initHardware() {
   // Inisiasi sensor ultrasonik
   sensor1.begin(9600, SERIAL_8N1, s1_RX, s1_TX);
   sensor2.begin(9600, SERIAL_8N1, s2_RX, s2_TX);
-  sensor3.begin(9600); // EspSoftwareSerial hanya butuh kecepatan baud
+  sensor3.begin(9600); // SoftwareSerial: hanya baud rate
+  
+  // -- Inisiasi sensor Water Flow --
+  pinMode(flowPin1, INPUT);
+  pinMode(flowPin2, INPUT);
+  pinMode(flowPin3, INPUT);
+  attachInterrupt(digitalPinToInterrupt(flowPin1), flowISR1, RISING);
+  attachInterrupt(digitalPinToInterrupt(flowPin2), flowISR2, RISING);
+  attachInterrupt(digitalPinToInterrupt(flowPin3), flowISR3, RISING);
 }
 
 // Fungsi generik membaca sensor ultrasonik dengan timeout yang diperpanjang
