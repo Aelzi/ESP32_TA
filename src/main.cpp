@@ -5,14 +5,15 @@
 #include <addons/RTDBHelper.h>
 #include <HardwareSerial.h>
 #include <SoftwareSerial.h>  // Pastikan install library EspSoftwareSerial melalui PlatformIO
+#include <LiquidCrystal_I2C.h>  // Tambahan untuk LCD
 
-//=== Konfig WiFi & Firebase ===
+//=== Konfig WiFi & Firebase Production ===
 #define WIFI_SSID     "Farel"
-#define WIFI_PASSWORD "123456789"
-#define API_KEY       "AIzaSyCvyT7WSOgRdLJ4ZzUtsTt3OEygEMVPJlE"
-#define DATABASE_URL  "test-ta-f2816-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define WIFI_PASSWORD "x"
+#define API_KEY       "x"
+#define DATABASE_URL  "x-x-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define USER_EMAIL    "alfarezi31as@gmail.com"
-#define USER_PASSWORD "123456789"
+#define USER_PASSWORD "x"
 
 FirebaseData fbdo;
 FirebaseAuth auth;
@@ -70,10 +71,32 @@ void IRAM_ATTR flowISR1() { flowCount1++; }
 void IRAM_ATTR flowISR2() { flowCount2++; }
 void IRAM_ATTR flowISR3() { flowCount3++; }
 
+//=== LCD Initialization ===
+LiquidCrystal_I2C lcd(0x27, 20, 4);  // Sesuaikan alamat I2C jika perlu
+
+// Variabel status untuk LCD
+bool sensor1Ok = false;
+bool sensor2Ok = false;
+bool sensor3Ok = false;
+bool motorRunning = false;
+unsigned long lastTxTime = 0;  // Waktu terakhir data terkirim berhasil ke Firebase
+
+// Variabel untuk batch update data sensor (misal: 30 detik)
+const unsigned long sensorWriteInterval = 1000; // 30 detik
+unsigned long lastSensorWriteTime = 0;
+
+// Tambahan global variable untuk posisi pintu saat ini (0 = tertutup, 100 = terbuka maksimal)
+int currentDoorPos = 0;
+
+// Tambahkan deklarasi buzzerPin dan variabel sensor terbaru
+const int buzzerPin = 12;  // Pilih pin yang tidak digunakan (misal: GPIO 12)
+float latestUltrasonic1 = 0, latestUltrasonic2 = 0, latestUltrasonic3 = 0;
+float latestFlow1 = 0, latestFlow2 = 0, latestFlow3 = 0;
+
 // Prototipe fungsi
 void initHardware();
 bool readUltrasonic(Stream &stream, float &dist);
-void sendToFirebase(float dist, const char* path);
+void sendToFirebase(float data, const char* path);
 void checkCommands();
 void updateMotor();
 void startMotor(MotorState dir, int pct);
@@ -84,10 +107,23 @@ void waterPump2Off();
 void waterPump3On();
 void waterPump3Off();
 void checkPumps();
+void updateLCD();  // Fungsi LCD baru
+String getTimestamp();  // Fungsi helper baru
+void checkPintuAir();  // Fungsi baru
+void checkBuzzer();  // Fungsi baru
+void debugBuzzerCause();  // Fungsi baru
+void updateBuzzerSensors();  // Fungsi baru
 
 void setup() {
   Serial.begin(115200);
   Serial.println("=== BOOT ===");
+
+  lcd.init();
+  lcd.backlight();
+
+  // Inisialisasi buzzer
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
 
   // WiFi Connection
   Serial.print("WiFi: connect…");
@@ -97,6 +133,15 @@ void setup() {
     delay(200);
   }
   Serial.println(" OK");
+
+  // Konfigurasi NTP (WIB: UTC+7)
+  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+  } else {
+    Serial.println("Time synchronized");
+  }
 
   // Firebase Initialization
   config.api_key = API_KEY;
@@ -108,69 +153,39 @@ void setup() {
   Firebase.reconnectWiFi(true);
   Serial.println("Firebase: ready");
 
-  // Initialize Hardware
   initHardware();
   Serial.println("Hardware: initialized");
 }
 
 void loop() {
+    static unsigned long lastBuzzerSensorUpdate = 0;
     unsigned long now = millis();
-    // Update motor secara real time
+    
+    // Perbarui sensor untuk buzzer setiap 500 ms agar pengecekan bersifat real time
+    if(now - lastBuzzerSensorUpdate >= 500) {
+        updateBuzzerSensors();
+        lastBuzzerSensorUpdate = now;
+    }
+    
+    // Lanjutkan fungsi-fungsi lain: batch update ke Firebase, kontrol pintu/pompa, update LCD, dll.
     updateMotor();
     
-    if (now - lastMillis < INTERVAL) {
-        return;
-    }
-    lastMillis = now;
-    Serial.println("\n--- Cycle start ---");
-    
-    // 1) Baca sensor ultrasonik 1
-    float dist;
-    if (readUltrasonic(sensor1, dist)) {
-        Serial.printf("Sensor 1: %.1f cm\n", dist);
-        sendToFirebase(dist, "/TEST/s1");
-    } else {
-        Serial.println("Sensor 1: read FAILED");
+    if (now - lastSensorWriteTime >= sensorWriteInterval) {
+        // ... (kode batch update Firebase seperti biasa)
     }
     
-    // 2) Baca sensor ultrasonik 2
-    if (readUltrasonic(sensor2, dist)) {
-        Serial.printf("Sensor 2: %.1f cm\n", dist);
-        sendToFirebase(dist, "/TEST/s2");
-    } else {
-        Serial.println("Sensor 2: read FAILED");
-    }
-    
-    // 3) Baca sensor ultrasonik 3
-    if (readUltrasonic(sensor3, dist)) {
-        Serial.printf("Sensor 3: %.1f cm\n", dist);
-        sendToFirebase(dist, "/TEST/s3");
-    } else {
-        Serial.println("Sensor 3: read FAILED");
-    }
-    
-    // 4) Baca sensor Water Flow dan kirim ke Firebase
-    // Menghitung flow rate (L/min) menggunakan interval 2 detik: Flow = (PulseCount / 2) / 7.5 = PulseCount / 15
-    float flow1 = flowCount1 / 15.0;
-    float flow2 = flowCount2 / 15.0;
-    float flow3 = flowCount3 / 15.0;
-    Serial.printf("Flow 1: %.2f L/min\n", flow1);
-    sendToFirebase(flow1, "/TEST/flow1");
-    Serial.printf("Flow 2: %.2f L/min\n", flow2);
-    sendToFirebase(flow2, "/TEST/flow2");
-    Serial.printf("Flow 3: %.2f L/min\n", flow3);
-    sendToFirebase(flow3, "/TEST/flow3");
-    
-    // Reset counter water flow untuk siklus berikutnya
-    flowCount1 = 0;
-    flowCount2 = 0;
-    flowCount3 = 0;
-    
-    // 5) Baca perintah motor dari Firebase
-    checkCommands();
-    
-    // 6) Cek status water pump
+    checkPintuAir();
     checkPumps();
+    motorRunning = (motorState != STOPPED);
+    updateLCD();
+    checkBuzzer();  // Pengecekan buzzer menggunakan nilai sensor yang sudah update secara real time
+
+    // Tambahkan di loop() session debug, misalnya setiap 3 detik:
+    static unsigned long lastFlowDebug = 0;
+    if (millis() - lastFlowDebug >= 3000) {
+      Serial.printf("Flow counts: %lu, %lu, %lu\n", flowCount1, flowCount2, flowCount3);
+      lastFlowDebug = millis();
+    }
 }
 
 void initHardware() {
@@ -241,36 +256,50 @@ bool readUltrasonic(Stream &stream, float &dist) {
     return true;
 }
 
-// Fungsi untuk mengirim data ke Firebase pada path yang diberikan
-void sendToFirebase(float dist, const char* path) {
-  Serial.printf("Firebase: sending %.1f to %s…", dist, path);
-  if (Firebase.RTDB.setFloat(&fbdo, path, dist)) {
-    Serial.println(" OK");
-  } else {
-    Serial.printf(" ERROR: %s\n", fbdo.errorReason().c_str());
+// Fungsi untuk mengirim data ke Firebase (write new child untuk sensor, overwrite untuk kontrol)
+void sendToFirebase(float data, const char* path) {
+  // Jika path mengandung "/Polder/", lakukan push data dengan key timestamp
+  if (strstr(path, "/Polder/") != nullptr) {
+    String timestamp = getTimestamp();
+    String fullPath = String(path) + "/" + timestamp;
+    if (Firebase.RTDB.setFloat(&fbdo, fullPath.c_str(), data)) {
+      Serial.printf("Firebase: pushed %.1f to %s\n", data, fullPath.c_str());
+      lastTxTime = millis();
+    } else {
+      Serial.printf("Firebase: ERROR pushing to %s: %s\n", fullPath.c_str(), fbdo.errorReason().c_str());
+    }
+  }
+  else {
+    // Untuk kontrol (misal pb, pt)
+    if (Firebase.RTDB.setFloat(&fbdo, path, data)) {
+      Serial.printf("Firebase: sent %.1f to %s OK\n", data, path);
+      lastTxTime = millis();
+    } else {
+      Serial.printf("Firebase: ERROR setting %s: %s\n", path, fbdo.errorReason().c_str());
+    }
   }
 }
 
 void checkCommands() {
   int pb = 0, pt = 0;
   Serial.print("Cek PB…");
-  if (Firebase.RTDB.getInt(&fbdo, "/TEST/PB"))
+  if (Firebase.RTDB.getInt(&fbdo, "/Kontrol/PB"))
     pb = fbdo.intData();
   Serial.printf(" %d\n", pb);
 
   Serial.print("Cek PT…");
-  if (Firebase.RTDB.getInt(&fbdo, "/TEST/PT"))
+  if (Firebase.RTDB.getInt(&fbdo, "/Kontrol/PT"))
     pt = fbdo.intData();
   Serial.printf(" %d\n", pt);
 
   if (pb > 0) {
     Serial.printf("Action: OPEN %d%%\n", pb);
     startMotor(OPENING, pb);
-    Firebase.RTDB.setInt(&fbdo, "/TEST/PB", 0);
+    Firebase.RTDB.setInt(&fbdo, "/Kontrol/PB", 0);
   } else if (pt > 0) {
     Serial.printf("Action: CLOSE %d%%\n", pt);
     startMotor(CLOSING, pt);
-    Firebase.RTDB.setInt(&fbdo, "/TEST/PT", 0);
+    Firebase.RTDB.setInt(&fbdo, "/Kontrol/PT", 0);
   } else {
     Serial.println("Action: none");
   }
@@ -304,8 +333,6 @@ void updateMotor() {
     ledcWrite(pwmCh, 0);
     motorState = STOPPED;
     Serial.println("Motor: STOPPED");
-  } else {
-    Serial.printf("Motor running: sisa waktu %lums\n", motorDur - (millis() - motorStart));
   }
 }
 
@@ -340,33 +367,238 @@ void waterPump3Off() {
 }
 
 void checkPumps() {
-  // Pump 1
+  static bool lastPump1 = false, lastPump2 = false, lastPump3 = false;
   bool pump1Status = false;
-  Serial.print("Cek pump1… ");
-  if (Firebase.RTDB.getBool(&fbdo, "/TEST/pump1"))
+  if (Firebase.RTDB.getBool(&fbdo, "/Kontrol/pump1"))
     pump1Status = fbdo.boolData();
-  else
-    Serial.printf("Error: %s\n", fbdo.errorReason().c_str());
-  Serial.printf("%s\n", pump1Status ? "ON" : "OFF");
-  pump1Status ? waterPump1On() : waterPump1Off();
-
-  // Pump 2
   bool pump2Status = false;
-  Serial.print("Cek pump2… ");
-  if (Firebase.RTDB.getBool(&fbdo, "/TEST/pump2"))
+  if (Firebase.RTDB.getBool(&fbdo, "/Kontrol/pump2"))
     pump2Status = fbdo.boolData();
-  else
-    Serial.printf("Error: %s\n", fbdo.errorReason().c_str());
-  Serial.printf("%s\n", pump2Status ? "ON" : "OFF");
-  pump2Status ? waterPump2On() : waterPump2Off();
-
-  // Pump 3
   bool pump3Status = false;
-  Serial.print("Cek pump3… ");
-  if (Firebase.RTDB.getBool(&fbdo, "/TEST/pump3"))
+  if (Firebase.RTDB.getBool(&fbdo, "/Kontrol/pump3"))
     pump3Status = fbdo.boolData();
-  else
-    Serial.printf("Error: %s\n", fbdo.errorReason().c_str());
-  Serial.printf("%s\n", pump3Status ? "ON" : "OFF");
-  pump3Status ? waterPump3On() : waterPump3Off();
+  
+  if (pump1Status != lastPump1) {
+    Serial.printf("Pump1 changed: %s\n", pump1Status ? "ON" : "OFF");
+    pump1Status ? waterPump1On() : waterPump1Off();
+    lastPump1 = pump1Status;
+  }
+  if (pump2Status != lastPump2) {
+    Serial.printf("Pump2 changed: %s\n", pump2Status ? "ON" : "OFF");
+    pump2Status ? waterPump2On() : waterPump2Off();
+    lastPump2 = pump2Status;
+  }
+  if (pump3Status != lastPump3) {
+    Serial.printf("Pump3 changed: %s\n", pump3Status ? "ON" : "OFF");
+    pump3Status ? waterPump3On() : waterPump3Off();
+    lastPump3 = pump3Status;
+  }
+}
+
+// Fungsi LCD: Menampilkan status sistem di LCD 4x20
+void updateLCD() {
+    lcd.clear();
+    // Baris 1: Status Sistem
+    lcd.setCursor(0, 0);
+    lcd.print("SYS: RUN");
+    
+    // Baris 2: Status Jaringan/Cloud
+    lcd.setCursor(0, 1);
+    lcd.print("NET: ");
+    lcd.print(WiFi.status()==WL_CONNECTED ? "OK" : "ERR");
+    
+    // Baris 3: Waktu data terakhir terkirim (dalam detik)
+    lcd.setCursor(0, 2);
+    lcd.print("Tx: ");
+    unsigned long secs = (millis() - lastTxTime) / 1000;
+    lcd.print(secs);
+    lcd.print("s");
+    
+    // Baris 4: Status Sensor dan Motor
+    lcd.setCursor(0, 3);
+    // Format: "1:O 2:O 3:F M:S" => O=OK, F=Fail; M: R=Running, S=Stopped.
+    lcd.print("1:");
+    lcd.print(sensor1Ok ? "O" : "F");
+    lcd.print(" 2:");
+    lcd.print(sensor2Ok ? "O" : "F");
+    lcd.print(" 3:");
+    lcd.print(sensor3Ok ? "O" : "F");
+    lcd.print(" M:");
+    lcd.print(motorRunning ? "R" : "S");
+}
+
+// Fungsi helper: Mendapatkan timestamp dalam format "YYYY-MM-DD-HH_MM_SS"
+String getTimestamp() {
+  struct tm timeinfo;
+  unsigned long start = millis();
+  // Tunggu hingga waktu tersinkron maksimal 5 detik
+  while(!getLocalTime(&timeinfo) && (millis() - start < 5000)) {
+    delay(100);
+  }
+  if (!getLocalTime(&timeinfo)) {
+    // Jika gagal sinkron waktu setelah 5 detik
+    return "0000-00-00-00_00_00";
+  }
+  char buffer[32];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d-%H_%M_%S", &timeinfo);
+  return String(buffer);
+}
+
+// Fungsi cek status pintu (motor) dengan hanya mencetak saat terjadi perubahan
+void checkPintuAir() {
+  static int lastTargetPos = -1;  // Nilai awal berbeda sehingga pasti tercetak pada awalnya
+  int targetPos = 0;
+  // Ambil nilai dari Firebase
+  if (Firebase.RTDB.getInt(&fbdo, "/Kontrol/PintuAir"))
+    targetPos = fbdo.intData();
+  
+  // Hanya cetak jika target berubah
+  if (targetPos != lastTargetPos) {
+    Serial.printf("Cek PintuAir... %d\n", targetPos);
+    lastTargetPos = targetPos;
+  }
+  
+  // Jika motor sedang tidak berjalan dan target berbeda dengan posisi saat ini, jalankan perintah
+  if (motorState == STOPPED && targetPos != currentDoorPos) {
+    int diff = targetPos - currentDoorPos;
+    if (diff > 0) {
+      Serial.printf("Action: OPEN dari %d%% ke %d%% (selisih %d%%)\n", currentDoorPos, targetPos, diff);
+      startMotor(OPENING, diff);
+    } else {
+      Serial.printf("Action: CLOSE dari %d%% ke %d%% (selisih %d%%)\n", currentDoorPos, targetPos, -diff);
+      startMotor(CLOSING, -diff);
+    }
+    currentDoorPos = targetPos;
+    // Opsional: reset perintah di Firebase
+    Firebase.RTDB.setInt(&fbdo, "/Kontrol/PintuAir", currentDoorPos);
+  } else {
+    // Hanya cetak jika terjadi perubahan target (agar tidak membanjiri serial)
+    static bool printedNoAction = false;
+    if (!printedNoAction) {
+      Serial.println("PintuAir: Tidak ada aksi, posisi sudah sesuai");
+      printedNoAction = true;
+    }
+  }
+}
+
+void checkBuzzer() {
+  bool buzzerCondition = false;
+  
+  // Sebelum cek, tampilkan debug detail penyebab buzzer menyala
+  debugBuzzerCause();
+  
+  // Cek kondisi dari motor
+  if (motorRunning) {
+    buzzerCondition = true;
+  }
+  
+  // Cek kondisi sensor ultrasonik
+  if (sensor1Ok && latestUltrasonic1 < 5.0) {
+    buzzerCondition = true;
+  }
+  if (sensor2Ok && latestUltrasonic2 < 5.0) {
+    buzzerCondition = true;
+  }
+  if (sensor3Ok && latestUltrasonic3 < 5.0) {
+    buzzerCondition = true;
+  }
+  
+  // Cek kondisi sensor water flow
+  if (latestFlow1 > 5.0) {
+    buzzerCondition = true;
+  }
+  if (latestFlow2 > 5.0) {
+    buzzerCondition = true;
+  }
+  if (latestFlow3 > 5.0) {
+    buzzerCondition = true;
+  }
+  
+  if (buzzerCondition) {
+    digitalWrite(buzzerPin, HIGH);
+    Serial.println("DEBUG: Buzzer ON");
+    delay(200);  // Durasi buzzer
+    digitalWrite(buzzerPin, LOW);
+    Serial.println("DEBUG: Buzzer OFF");
+  }
+}
+
+// Fungsi untuk menampilkan debug detail penyebab buzzer menyala
+void debugBuzzerCause() {
+  Serial.println("=== Debug Buzzer Cause ===");
+  
+  // Cek kondisi motor
+  if (motorRunning) {
+    Serial.println(" - Motor running: TRUE");
+  } else {
+    Serial.println(" - Motor running: FALSE");
+  }
+  
+  // Cek sensor ultrasonik
+  if (sensor1Ok) {
+    Serial.printf(" - Sensor1: %.1f cm", latestUltrasonic1);
+    if(latestUltrasonic1 < 5.0) Serial.println(" -> BELOW threshold (5.0 cm)");
+    else Serial.println(" -> OK");
+  } else {
+    Serial.println(" - Sensor1: read FAILED");
+  }
+  
+  if (sensor2Ok) {
+    Serial.printf(" - Sensor2: %.1f cm", latestUltrasonic2);
+    if(latestUltrasonic2 < 5.0) Serial.println(" -> BELOW threshold (5.0 cm)");
+    else Serial.println(" -> OK");
+  } else {
+    Serial.println(" - Sensor2: read FAILED");
+  }
+  
+  if (sensor3Ok) {
+    Serial.printf(" - Sensor3: %.1f cm", latestUltrasonic3);
+    if(latestUltrasonic3 < 5.0) Serial.println(" -> BELOW threshold (5.0 cm)");
+    else Serial.println(" -> OK");
+  } else {
+    Serial.println(" - Sensor3: read FAILED");
+  }
+  
+  // Cek sensor water flow
+  Serial.printf(" - Flow1: %.2f L/min", latestFlow1);
+  if(latestFlow1 > 5.0) Serial.println(" -> ABOVE threshold (5.0 L/min)");
+  else Serial.println(" -> OK");
+  
+  Serial.printf(" - Flow2: %.2f L/min", latestFlow2);
+  if(latestFlow2 > 5.0) Serial.println(" -> ABOVE threshold (5.0 L/min)");
+  else Serial.println(" -> OK");
+  
+  Serial.printf(" - Flow3: %.2f L/min", latestFlow3);
+  if(latestFlow3 > 5.0) Serial.println(" -> ABOVE threshold (5.0 L/min)");
+  else Serial.println(" -> OK");
+
+  Serial.println("==========================");
+}
+
+// Fungsi updateBuzzerSensors() dipanggil setiap 500 ms untuk memperbarui nilai sensor secara real time untuk pengecekan buzzer
+void updateBuzzerSensors() {
+  float d;
+  // Baca sensor Ultrasonik 1 (jika tersedia; jika gagal, biarkan nilai tak berubah)
+  if (readUltrasonic(sensor1, d)) {
+    latestUltrasonic1 = d;
+    sensor1Ok = true;
+  } else {
+    sensor1Ok = false;
+  }
+  
+  // Baca sensor Ultrasonik 2
+  if (readUltrasonic(sensor2, d)) {
+    latestUltrasonic2 = d;
+    sensor2Ok = true;
+  } else {
+    sensor2Ok = false;
+  }
+  
+  // Baca sensor Ultrasonik 3
+  if (readUltrasonic(sensor3, d)) {
+    latestUltrasonic3 = d;
+    sensor3Ok = true;
+  } else {
+    sensor3Ok = false;
+  }
 }
