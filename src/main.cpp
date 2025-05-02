@@ -11,7 +11,7 @@
 #define WIFI_SSID     "Farel"
 #define WIFI_PASSWORD "x"
 #define API_KEY       "x"
-#define DATABASE_URL  "x-x-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define DATABASE_URL  "x-xx-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define USER_EMAIL    "alfarezi31as@gmail.com"
 #define USER_PASSWORD "x"
 
