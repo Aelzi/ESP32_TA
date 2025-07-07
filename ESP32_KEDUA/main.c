@@ -16,7 +16,7 @@
 #define Web_API_KEY   "XXXXXXXXXX"
 #define DATABASE_URL  "floody-252ef-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define USER_EMAIL    "alfarezi31as@gmail.com"
-#define USER_PASS     "123456789"
+#define USER_PASS     "XXXXXXXXXX"
 
 // Firebase objects
 FirebaseData fbdo;
